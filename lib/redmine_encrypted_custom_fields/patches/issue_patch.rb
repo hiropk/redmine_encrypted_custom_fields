@@ -17,17 +17,25 @@ module RedmineEncryptedCustomFields
       # Redmine は、保存するユーザーが編集できるカスタムフィールドの値しか検証しない。
       # safe_attributes を通さずにプログラムから代入された新しい値も検証し、
       # 拒否した入力は、誰が保存する場合でもエラーにする。
+      #
+      # 検証が必要な値（新しい値か拒否した入力）があるときだけ editable を計算する。
+      # 暗号化フィールドを使っていない保存では、本体以上のクエリを発行しない。
       def validate_custom_field_values
         super
-        editable_ids = editable_custom_field_values(new_record? ? author : current_journal&.user).map(&:custom_field_id)
-        custom_field_values.each do |custom_field_value|
-          next unless RedmineEncryptedCustomFields.encrypted_field?(custom_field_value.custom_field)
-          next if editable_ids.include?(custom_field_value.custom_field_id)
+        # カスタムフィールドの値を一度も読み込んでいなければ、代入されたものもない。
+        return unless @custom_field_values
 
-          if custom_field_value.value.is_a?(PendingSecret) ||
-             custom_field_value.instance_variable_get(EncryptedTextFormat::REJECTION)
-            custom_field_value.validate_value
-          end
+        targets = @custom_field_values.select do |custom_field_value|
+          RedmineEncryptedCustomFields.encrypted_field?(custom_field_value.custom_field) &&
+            (custom_field_value.value.is_a?(PendingSecret) ||
+             custom_field_value.instance_variable_get(EncryptedTextFormat::REJECTION))
+        end
+        return if targets.empty?
+
+        # 本体の Issue#validate_custom_field_values と同じユーザーで判定する。
+        editable_ids = editable_custom_field_values(new_record? ? author : current_journal&.user).map(&:custom_field_id)
+        targets.each do |custom_field_value|
+          custom_field_value.validate_value unless editable_ids.include?(custom_field_value.custom_field_id)
         end
       end
 

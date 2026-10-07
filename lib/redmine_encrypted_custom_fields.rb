@@ -56,9 +56,16 @@ module RedmineEncryptedCustomFields
 
     # 配列そのものに追加する。リクエストのパラメータフィルタ
     # （env_config["action_dispatch.parameter_filter"]）は同じ配列を参照している。
+    # Rails 7.2 で確認（test_form_update_and_parameter_log などが回帰を検知する）。
     def add_parameter_filter
       filters = Rails.application.config.filter_parameters
       filters << SECRET_PARAM unless filters.include?(SECRET_PARAM)
+      return if filters.any? {|f| f.respond_to?(:redmine_encrypted_custom_fields_filter?)}
+
+      # 再読み込みされても古い定義を掴まないよう、呼ばれるたびに定数を引く。
+      filter = lambda {|key, value, original_params| ::RedmineEncryptedCustomFields::ParameterFilter.call(key, value, original_params)}
+      filter.define_singleton_method(:redmine_encrypted_custom_fields_filter?) {true}
+      filters << filter
     end
 
     def warn_if_key_misconfigured

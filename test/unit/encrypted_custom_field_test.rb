@@ -176,6 +176,22 @@ class EncryptedCustomFieldTest < ActiveSupport::TestCase
     assert_not_includes issue.custom_field_values.inspect, SECRET
   end
 
+  # 暗号化フィールドの値を変えない保存では、プラグインが editable の計算（クエリ）を足さない。
+  def test_save_without_encrypted_changes_does_not_compute_editable_values
+    issue = issue_with_secret(@field)
+    issue.init_journal(User.find(2))
+    issue.subject = 'not loaded'
+    issue.expects(:editable_custom_field_values).never
+    issue.save!
+
+    issue = Issue.find(1)
+    issue.init_journal(User.find(2))
+    issue.custom_field_values # 読み込み済みでも、新しい値がなければ計算しない
+    issue.subject = 'loaded'
+    issue.expects(:editable_custom_field_values).never
+    issue.save!
+  end
+
   # -- 履歴 ------------------------------------------------------
 
   def test_journal_records_only_that_value_changed

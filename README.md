@@ -12,7 +12,7 @@ API トークン、パスワード、顧客環境の認証情報など、「チ�
 | 表示 | 常に固定長マスク `••••••••`。「表示」ボタンを押したときだけ復号 |
 | 権限 | ロールに「閲覧（マスク）」「復号表示」「編集」の 3 権限を追加 |
 | 監査 | 復号のたびに「誰が・いつ・どのチケットの・どのフィールドを・どこから」を記録 |
-| 漏洩対策 | 履歴・メール・REST API・CSV・PDF・Atom・ログに平文も暗号文も出さない |
+| 漏洩対策 | 履歴・メール・REST API・CSV・PDF・Atom に平文も暗号文も出さない。リクエストログでは値を伏せる |
 
 > [!IMPORTANT]
 > 守れるのは「**DB だけが漏れた**」ケースです（ダンプ・バックアップ・DB への不正アクセス・DBA による参照）。
@@ -64,6 +64,11 @@ EnvironmentFile=/etc/redmine/redmine.env   # chmod 600, Redmine の実行ユー�
 | --- | --- | --- |
 | `REDMINE_ENCRYPTED_FIELDS_KEY` | ○ | Base64（パディングあり・改行なし）で 32 バイトちょうど。厳密に検証します |
 | `REDMINE_ENCRYPTED_FIELDS_KEY_ID` | | 暗号文に埋め込む鍵 ID（`[a-z0-9]{1,16}`、既定 `k1`）。将来の鍵ローテーション用 |
+
+> [!CAUTION]
+> 現バージョンは「現在の鍵 ID の鍵」でしか復号できません。値を保存したあとに
+> `REDMINE_ENCRYPTED_FIELDS_KEY_ID` や `REDMINE_ENCRYPTED_FIELDS_KEY` を変えると、
+> **保存済みの値はすべて復号できなくなります**（再暗号化の仕組みは未実装）。一度決めたら変えないでください。
 
 鍵が未設定・不正なとき、Redmine は通常どおり起動しますが（ログに警告）、暗号化フィールドは
 **保存も復号もできなくなります**。平文保存へのフォールバックはありません。
@@ -180,7 +185,8 @@ ecf:v1:<key id>:<nonce>:<ciphertext>:<tag>      (各要素は Base64url)
 | メール通知・Atom・活動 | 「〜が更新されました」/ マスク |
 | REST API（JSON/XML） | マスク |
 | 検索・フィルタ・並び替え・グループ化・集計 | 対象外（実値では扱えない） |
-| Rails のリクエストログ | `encrypted_value` を `filter_parameters` に追加して `[FILTERED]` にする |
+| Rails のリクエストログ | `[FILTERED]` にする。決められた形式の `encrypted_value` に加え、拒否される平文の送信（`custom_field_values[ID]=...` や API の `custom_fields: [{id:, value:}]`）も、暗号化フィールドの ID で判定して伏せる |
+| SQL のデバッグログ | ログレベルが debug のときは、保存時の SQL に**暗号文**が出る（平文は出ない）。本番は info 以上を推奨 |
 | 例外メッセージ・監査ログ | 値・暗号文・鍵を含めない |
 
 閲覧権限のないユーザーには、上の経路のどこでもフィールド自体を出しません。
@@ -190,7 +196,7 @@ ecf:v1:<key id>:<nonce>:<ciphertext>:<tag>      (各要素は Base64url)
 `POST /issues/:issue_id/encrypted_custom_fields/:custom_field_id/reveal`
 
 - POST のみです（GET はルーティングしません）。CSRF トークンを検証します。
-- `?format=json`、API キー（`key` / `X-Redmine-API-Key`）、Basic 認証のどれかが付いたリクエストは拒否します。
+- `?format=json`、API キー（`key` / `X-Redmine-API-Key`）、`Authorization` ヘッダー（Basic 認証・OAuth の Bearer トークン）のどれかが付いたリクエストは拒否します。
   - Redmine は format が json/xml のとき CSRF 検証を省略するため、format 指定も拒否しています。
 - 次をすべて確認します。
   - ログイン済みのブラウザセッションであること
@@ -207,7 +213,7 @@ ecf:v1:<key id>:<nonce>:<ciphertext>:<tag>      (各要素は Base64url)
 | 経路 | 扱い |
 | --- | --- |
 | チケットのコピー（単体・一括・プロジェクトのコピー） | 暗号化フィールドの値は**コピーしない**（空になる） |
-| 一括編集 | UI に出さないうえ、直接リクエストしてもパラメータから除外する |
+| 一括編集 | UI に出さない。直接リクエストされても、暗号化フィールドの値はパラメータから取り除いて無視する（`custom_field_values[ID]` と `custom_fields[]` の両方の形式。ほかの項目の一括更新は行われる） |
 | CSV インポート・メール受信 | 平文を渡す経路なので、バリデーションエラーで拒否 |
 | コンソールや他プラグインによる直接代入 | `CustomValue` に生の値が入っても、保存前に必ず暗号化する（平文のまま保存されない） |
 | カスタムフィールドの形式変更 | Redmine 本体が保存済みフィールドの形式変更を禁止しているので、通常フィールドとの相互変換はできない |
@@ -224,7 +230,7 @@ ecf:v1:<key id>:<nonce>:<ciphertext>:<tag>      (各要素は Base64url)
 | `IssueCustomField#visible_by?` | 閲覧権限をフィールドの表示可否に組み込む |
 | `Journal#add_custom_field_detail` | `JournalDetail` に値を保存しない |
 | `CustomFieldsHelper#render_api_custom_values` | REST API で値をそのまま出力しないようにする |
-| `IssuesController#bulk_update` | 一括編集での書き込みを拒否する |
+| `IssuesController#bulk_update` | 一括編集で送られた暗号化フィールドの値を取り除く（無視する） |
 
 ## 制約
 
@@ -268,7 +274,7 @@ bin/rails test plugins/redmine_encrypted_custom_fields/test
 - 保存データ: `custom_values` / `journal_details` / 監査ログ
 - HTML、CSV、PDF（ストリームを展開して検索）
 - REST API（JSON / XML）、メール、Atom
-- Rails のリクエストログ
+- Rails のリクエストログ（決められた形式で送った場合と、拒否される平文で送った場合の両方）
 
 あわせて、次の点もテストしています。
 

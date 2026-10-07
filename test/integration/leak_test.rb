@@ -147,11 +147,8 @@ class EncryptedCustomFieldsLeakTest < Redmine::IntegrationTest
     get '/projects/ecookbook/activity', params: {show_issues: 1}
     assert_no_leak response.body
 
-    begin
-      get '/projects/ecookbook/issues/changes.atom'
-    rescue
-      nil
-    end
+    get '/issues/changes.atom', params: {project_id: 'ecookbook'}
+    assert_response :success
     assert_no_leak response.body
   end
 
@@ -169,25 +166,59 @@ class EncryptedCustomFieldsLeakTest < Redmine::IntegrationTest
     assert_select "#filters-table tr#tr_cf_#{@field.id}", 0
   end
 
-  def test_form_update_and_parameter_log
+  # ブロック内のログ出力（DEBUG 以上）を文字列で返す。
+  def capture_log
     log = StringIO.new
     logger = ActiveSupport::Logger.new(log)
     logger.level = Logger::DEBUG
     saved = [Rails.logger, ActionController::Base.logger, ActiveRecord::Base.logger]
     Rails.logger = ActionController::Base.logger = ActiveRecord::Base.logger = logger
     begin
+      yield
+    ensure
+      Rails.logger, ActionController::Base.logger, ActiveRecord::Base.logger = saved
+    end
+    log.string
+  end
+
+  def test_form_update_and_parameter_log
+    output = capture_log do
       log_user('jsmith', 'jsmith')
       patch "/issues/#{@issue.id}", params: {issue: {custom_field_values: {@field.id.to_s => {action: 'replace', encrypted_value: "#{SECRET}-2"}}}}
       assert_response :redirect
       get "/issues/#{@issue.id}"
-    ensure
-      Rails.logger, ActionController::Base.logger, ActiveRecord::Base.logger = saved
     end
 
-    output = log.string
     assert_match /"encrypted_value"\s*=>\s*"\[FILTERED\]"/, output
     assert_not_includes output, SECRET
     assert_equal "#{SECRET}-2", RedmineEncryptedCustomFields::Cipher.decrypt(raw_value(@issue, @field), aad: aad(@issue, @field))
+  end
+
+  # 決められた形式以外（平文の文字列）で送られた値も、拒否される前のログで伏せられる。
+  # 通常のカスタムフィールドの値はこれまでどおりログに出る。
+  def test_plain_values_are_filtered_from_request_log
+    plain = IssueCustomField.create!(name: 'Plain', field_format: 'string', is_for_all: true, visible: true, tracker_ids: [1])
+    Setting.rest_api_enabled = '1'
+    output = capture_log do
+      log_user('jsmith', 'jsmith')
+      patch "/issues/#{@issue.id}", params: {issue: {custom_field_values: {@field.id.to_s => "#{SECRET}-form", plain.id.to_s => 'visible-normal-value'}}}
+      assert_response :success # バリデーションエラーでフォームを再表示
+
+      put "/issues/#{@issue.id}.json",
+          params: {issue: {custom_fields: [{id: @field.id, value: "#{SECRET}-api"}, {id: plain.id, value: 'visible-api-value'}]}},
+          headers: credentials('jsmith'), as: :json
+      assert_response :unprocessable_content
+
+      put "/issues/#{@issue.id}.xml",
+          params: %(<issue><custom_fields type="array"><custom_field id="#{@field.id}"><value>#{SECRET}-xml</value></custom_field></custom_fields></issue>),
+          headers: credentials('jsmith').merge('CONTENT_TYPE' => 'application/xml')
+      assert_response :unprocessable_content
+    end
+
+    assert_not_includes output, SECRET
+    assert_includes output, 'visible-normal-value'
+    assert_includes output, 'visible-api-value'
+    assert_equal @ciphertext, raw_value(@issue, @field)
   end
 
   def test_validation_error_does_not_echo_value
@@ -207,6 +238,24 @@ class EncryptedCustomFieldsLeakTest < Redmine::IntegrationTest
     assert_response :redirect
     assert_equal stored, raw_value(@issue, @field)
     assert_nil raw_value(Issue.find(2), @field)
+
+    # custom_fields[] 形式でも除外される（削除も置換もできない）
+    post '/issues/bulk_update', params: {ids: [@issue.id, 2], issue: {custom_fields: [{id: @field.id, value: {action: 'clear'}}]}}
+    assert_response :redirect
+    assert_equal stored, raw_value(@issue, @field)
+    post '/issues/bulk_update', params: {ids: [@issue.id, 2], issue: {custom_fields: [{id: @field.id, value: {action: 'replace', encrypted_value: 'bulk'}}]}}
+    assert_response :redirect
+    assert_equal stored, raw_value(@issue, @field)
+    assert_nil raw_value(Issue.find(2), @field)
+  end
+
+  # 本体の一括更新（ほかの項目）は引き続き動く
+  def test_bulk_update_of_other_attributes_still_works
+    log_user('jsmith', 'jsmith')
+    post '/issues/bulk_update', params: {ids: [@issue.id, 2], issue: {priority_id: 6, custom_field_values: {@field.id.to_s => {action: 'clear'}}}}
+    assert_response :redirect
+    assert_equal [6, 6], Issue.where(id: [@issue.id, 2]).order(:id).pluck(:priority_id)
+    assert_equal @ciphertext, raw_value(@issue, @field)
   end
 
   def test_copy_through_controller_drops_secret
