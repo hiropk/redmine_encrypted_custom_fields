@@ -223,4 +223,33 @@ class EncryptedCustomFieldsRevealTest < Redmine::IntegrationTest
     assert_select 'table.ecf-audit-logs tbody tr', 1
     assert_no_secret
   end
+
+  # 画面に「Translation missing」が出ないこと（en / ja）
+  def test_pages_have_no_missing_translations
+    post reveal_path_as_jsmith
+    reset!
+    log_user('admin', 'admin')
+    %w(en ja).each do |language|
+      User.find(1).update!(language: language)
+      [
+        '/admin/encrypted_custom_field_audit_logs',
+        "/issues/#{@issue.id}",
+        "/custom_fields/#{@field.id}/edit",
+        '/custom_fields/new?type=IssueCustomField&custom_field[field_format]=encrypted_text',
+        '/roles/1/edit'
+      ].each do |path|
+        get path
+        assert_response :success, path
+        assert_not_includes response.body, 'Translation missing', "#{language} #{path}"
+        assert_not_includes response.body, 'translation_missing', "#{language} #{path}"
+      end
+    end
+  end
+
+  private
+
+  def reveal_path_as_jsmith
+    log_user('jsmith', 'jsmith')
+    reveal_path
+  end
 end
