@@ -1,0 +1,7 @@
+<%= render partial: 'custom_fields/formats/regexp', locals: {f: f, custom_field: custom_field} %>
+<p>
+  <em class="info"><%= l(:text_ecf_custom_field_info) %></em>
+</p>
+<% unless RedmineEncryptedCustomFields.key_provider.configured? %>
+  <p class="warning"><%= l(:error_ecf_key_not_configured) %></p>
+<% end %>

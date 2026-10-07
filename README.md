@@ -1,8 +1,284 @@
 # Redmine Encrypted Custom Fields
 
-Encrypted text custom field for Redmine issues: AES-256-GCM at rest, masked everywhere,
-reveal-on-click with role permissions and an audit log.
+Redmine のチケットに **「暗号化テキスト」形式のカスタムフィールド**を追加するプラグインです。
 
-Work in progress. See the initial implementation pull request.
+API トークン、パスワード、顧客環境の認証情報など、「チケットに書きたいけれど平文で DB に置きたくない」
+値を扱うためのものです。
 
-License: GNU GPL v2 or later (see [LICENSE](LICENSE)).
+| | |
+| --- | --- |
+| 暗号化 | AES-256-GCM（OpenSSL）。DB には暗号文だけを保存 |
+| 鍵 | 環境変数 `REDMINE_ENCRYPTED_FIELDS_KEY`。DB・設定・ログには保存しない |
+| 表示 | 常に固定長マスク `••••••••`。「表示」ボタンを押したときだけ復号 |
+| 権限 | ロールに「閲覧（マスク）」「復号表示」「編集」の 3 権限を追加 |
+| 監査 | 復号のたびに「誰が・いつ・どのチケットの・どのフィールドを・どこから」を記録 |
+| 漏洩対策 | 履歴・メール・REST API・CSV・PDF・Atom・ログに平文も暗号文も出さない |
+
+> [!IMPORTANT]
+> 守れるのは「**DB だけが漏れた**」ケースです（ダンプ・バックアップ・DB への不正アクセス・DBA による参照）。
+> アプリケーションサーバーごと侵害されて鍵も取られた場合は復号されます。
+
+## 動作環境
+
+- Redmine 6.1（6.1.2 で動作確認）、Rails 7.2、Ruby 3.2 以上
+- PostgreSQL / MySQL / SQLite（特定 DB 依存の SQL は使っていません。テストは PostgreSQL で実施）
+- Redmine 6.0 / 7.x は未検証です
+
+## インストール
+
+```bash
+cd /path/to/redmine
+git clone https://github.com/hiropk/redmine_encrypted_custom_fields.git plugins/redmine_encrypted_custom_fields
+bundle exec rake redmine:plugins:migrate NAME=redmine_encrypted_custom_fields RAILS_ENV=production
+```
+
+鍵を設定して Redmine を再起動します（次の節）。
+
+### 鍵の生成と設定
+
+鍵は **32 バイトの乱数を Base64 にしたもの**です。
+
+```bash
+openssl rand -base64 32
+# または
+ruby -rsecurerandom -rbase64 -e 'puts Base64.strict_encode64(SecureRandom.random_bytes(32))'
+```
+
+Redmine のプロセスに環境変数として渡します。
+
+```yaml
+# docker compose
+services:
+  redmine:
+    environment:
+      REDMINE_ENCRYPTED_FIELDS_KEY: "${REDMINE_ENCRYPTED_FIELDS_KEY}"
+```
+
+```ini
+# systemd: /etc/systemd/system/redmine.service
+[Service]
+EnvironmentFile=/etc/redmine/redmine.env   # chmod 600, Redmine の実行ユーザーだけが読める
+```
+
+| 環境変数 | 必須 | 内容 |
+| --- | --- | --- |
+| `REDMINE_ENCRYPTED_FIELDS_KEY` | ○ | Base64（パディングあり・改行なし）で 32 バイトちょうど。厳密に検証します |
+| `REDMINE_ENCRYPTED_FIELDS_KEY_ID` | | 暗号文に埋め込む鍵 ID（`[a-z0-9]{1,16}`、既定 `k1`）。将来の鍵ローテーション用 |
+
+鍵が未設定・不正なとき、Redmine は通常どおり起動しますが（ログに警告）、暗号化フィールドは
+**保存も復号もできなくなります**。平文保存へのフォールバックはありません。
+
+### 鍵のバックアップ
+
+> [!WARNING]
+> 鍵を失うと、保存済みの値は二度と復号できません。
+
+- 鍵は **DB のバックアップとは別の場所**に保管してください（パスワードマネージャー、Secrets Manager など）。
+  同じ場所に置くと「DB と鍵を分離する」意味がなくなります。
+- Git リポジトリ、Redmine の設定画面、チケット、ログには書かないでください。
+
+## 使い方
+
+### 1. 権限を付与する
+
+「管理 → ロールと権限」の「チケットトラッキング」に 3 つの権限が追加されます。
+**既定ではどのロールにも付与されていません。**
+
+| 権限 | できること |
+| --- | --- |
+| 暗号化カスタムフィールドの閲覧（マスク表示） | フィールドの存在と、値が設定済みかどうかが分かる。これがないとフィールド自体が見えない |
+| 暗号化カスタムフィールドの復号表示 | 「表示」ボタンで値を復号できる |
+| 暗号化カスタムフィールドの編集 | 値を設定・置換・削除できる |
+
+- 復号表示・編集には閲覧権限も必要です。
+- 匿名ユーザーには付与できません。
+- チケットの閲覧権限、カスタムフィールドの「表示」設定（ロール単位）、ワークフローの読み取り専用設定もそのまま効きます。
+
+例:
+
+| ロール | 閲覧 | 復号 | 編集 |
+| --- | --- | --- | --- |
+| 管理者 | ○ | ○ | ○ |
+| 開発者 | ○ | ○ | ○ |
+| 報告者 | ○ | × | × |
+
+### 2. カスタムフィールドを作る
+
+「管理 → カスタムフィールド → 新しいカスタムフィールド → チケット」で、形式に **暗号化テキスト** を選びます。
+使えるオプションは最小/最大長と正規表現だけです。デフォルト値・リンク URL・フィルタ・検索・複数値は、
+平文が残る・中身が推測できるといった理由で使えません。
+
+### 3. 値を入力する
+
+チケットの編集フォームには、既存の値（平文も暗号文も）を一切出しません。
+
+- **現在の値を維持** … 何も変えない（空欄のまま送信した場合もこれ）
+- **置き換える** … 新しい値を入力する（入力し始めると自動で選ばれます）
+- **削除する** … 値を消す
+
+空欄で送信しても既存の値は消えません。
+
+### 4. 値を表示する
+
+チケット詳細ではマスクだけが表示されます。復号表示の権限があれば「表示」ボタンが出ます。
+
+- 押すとその場で復号して表示し、30 秒後か「隠す」で DOM から消します。
+- チケット一覧・CSV・PDF・メールなどでは常にマスクです。
+
+### 5. 監査ログを見る
+
+「管理 → 暗号化フィールド監査ログ」に、復号の成功と失敗が記録されます。
+
+- 記録する項目: ユーザー、プロジェクト、チケット、フィールド、日時、操作、IP、User-Agent、リクエスト ID
+- 値・暗号文・リクエスト本文は記録しません。
+- **監査ログを保存できなかったときは、値を返しません。**
+
+## REST API
+
+- 取得: 値は `"********"`（未設定なら `null`）。
+- 更新: 次の形で送ります。
+
+  ```json
+  {"issue": {"custom_fields": [
+    {"id": 8, "value": {"action": "replace", "encrypted_value": "new-secret"}}
+  ]}}
+  ```
+
+  - `action` は `keep` / `replace` / `clear` のいずれか。
+  - 取得したマスク値 `"********"` や空文字をそのまま送り返した場合は「維持」として扱います。
+  - それ以外の平文を直接渡すと、バリデーションエラーで拒否します。
+- **API キーでは復号できません**。復号はログイン中のブラウザセッションからのみ可能です。
+
+## セキュリティ設計
+
+### 保存形式
+
+```text
+ecf:v1:<key id>:<nonce>:<ciphertext>:<tag>      (各要素は Base64url)
+```
+
+- **AES-256-GCM**:
+  - ノンスは暗号化のたびに `SecureRandom` で 12 バイト生成します。
+  - タグは 16 バイトで、切り詰められたタグは拒否します。
+- **AAD**（認証付き追加データ）:
+  - 形式バージョン・鍵 ID・`Issue:<チケットID>:CustomField:<フィールドID>` を含めています。
+  - DB 上で暗号文を別のチケットや別のフィールドへ付け替えると、復号に失敗します。
+  - 暗号化はチケット保存後（ID 確定後）に行うので、新規作成時も同じ方式で暗号化できます。
+- **形式は信用しない**: `ecf:` で始まる文字列を入力しても「暗号化済み」とは扱いません。
+  入力はフォーム/API の決まった構造（`action` / `encrypted_value`）からしか受け付けません。
+- **自動復号しない**: モデルから値を読んでも暗号文が返るだけです。復号するのは復号エンドポイントだけです。
+- **無駄な再暗号化をしない**: 値を変えずに保存した場合は、暗号文もそのまま残ります。
+
+### 出力経路ごとの扱い
+
+| 経路 | 扱い |
+| --- | --- |
+| チケット詳細 | マスク + 「表示」ボタン（平文を HTML/JS に事前に埋め込まない） |
+| 編集フォーム | 値を埋め込まない（password 入力欄 + 維持/置換/削除の選択） |
+| チケット一覧・CSV・PDF | マスク |
+| 履歴（Journal） | `JournalDetail` にはマスク（未設定なら nil）だけを保存し、表示は「〜が更新されました」 |
+| メール通知・Atom・活動 | 「〜が更新されました」/ マスク |
+| REST API（JSON/XML） | マスク |
+| 検索・フィルタ・並び替え・グループ化・集計 | 対象外（実値では扱えない） |
+| Rails のリクエストログ | `encrypted_value` を `filter_parameters` に追加して `[FILTERED]` にする |
+| 例外メッセージ・監査ログ | 値・暗号文・鍵を含めない |
+
+閲覧権限のないユーザーには、上の経路のどこでもフィールド自体を出しません。
+
+### 復号エンドポイント
+
+`POST /issues/:issue_id/encrypted_custom_fields/:custom_field_id/reveal`
+
+- POST のみです（GET はルーティングしません）。CSRF トークンを検証します。
+- `?format=json`、API キー（`key` / `X-Redmine-API-Key`）、Basic 認証のどれかが付いたリクエストは拒否します。
+  - Redmine は format が json/xml のとき CSRF 検証を省略するため、format 指定も拒否しています。
+- 次をすべて確認します。
+  - ログイン済みのブラウザセッションであること
+  - ユーザーがチケットを閲覧できること
+  - フィールドがそのチケットのプロジェクト・トラッカーで有効であること
+  - フィールドがユーザーに表示可能であること
+  - ユーザーに復号表示の権限があること
+- 存在しない ID や閲覧できない ID には 404 を返し、存在するかどうかを推測させません。
+- `Cache-Control: no-store` を付けます。
+- 復号した値はサーバー側でキャッシュせず、ブラウザ側でも textContent で挿入するだけで、ストレージには保存しません。
+
+### 通常フォーム以外の保存経路
+
+| 経路 | 扱い |
+| --- | --- |
+| チケットのコピー（単体・一括・プロジェクトのコピー） | 暗号化フィールドの値は**コピーしない**（空になる） |
+| 一括編集 | UI に出さないうえ、直接リクエストしてもパラメータから除外する |
+| CSV インポート・メール受信 | 平文を渡す経路なので、バリデーションエラーで拒否 |
+| コンソールや他プラグインによる直接代入 | `CustomValue` に生の値が入っても、保存前に必ず暗号化する（平文のまま保存されない） |
+| カスタムフィールドの形式変更 | Redmine 本体が保存済みフィールドの形式変更を禁止しているので、通常フィールドとの相互変換はできない |
+
+### Redmine 本体へのパッチ（すべて `prepend`、本体ファイルは変更なし）
+
+| 対象 | 理由 |
+| --- | --- |
+| `CustomValue#value=` / `before_save` | 保存直前に、チケット ID を含む AAD で暗号化する |
+| `Issue#read_only_attribute_names` | 編集権限がないユーザーには読み取り専用にする（フォームと API の両方に効く） |
+| `Issue#validate_custom_field_values` | 編集権限の有無に関係なく、新しい値と不正な入力を必ず検証する |
+| `Issue#save_custom_field_values` | 保存後、メモリ上の値を暗号文に戻す（平文を持ち続けない・履歴を誤検知しない） |
+| `Issue#copy_from` | コピー時に秘密値を複製しない |
+| `IssueCustomField#visible_by?` | 閲覧権限をフィールドの表示可否に組み込む |
+| `Journal#add_custom_field_detail` | `JournalDetail` に値を保存しない |
+| `CustomFieldsHelper#render_api_custom_values` | REST API で値をそのまま出力しないようにする |
+| `IssuesController#bulk_update` | 一括編集での書き込みを拒否する |
+
+## 制約
+
+- 対象はチケットのカスタムフィールドだけで、1 行テキストのみ（長文テキストは未対応）。
+- 値による検索・フィルタ・並び替え・グループ化はできません。
+- 鍵ローテーション用の再暗号化タスクはまだありません。
+  - 保存形式に鍵 ID を含めてあるので、後から追加できる設計です。
+- KMS / Vault 連携、API からの復号、コピーボタンは未実装です。
+- チケットをコピーしても暗号化フィールドの値は引き継がれません。
+- 入力エラーやトラッカー変更でフォームが描き直されると、入力した値は消えます（平文をフォームに埋め込まないため）。
+  再入力を促すメッセージを表示します。
+- 「表示」で画面に出した値は、ブラウザのメモリやクリップボードに残る可能性があります。
+- ブラウザでの表示・非表示の動作は自動テストの対象外です（「テスト」の節を参照）。
+
+## アンインストール
+
+> [!WARNING]
+> プラグインを外すと形式 `encrypted_text` が使えなくなり、**既存の値（暗号文）がそのまま表示されるようになります。**
+> 平文が出るわけではありませんが、外す前にフィールドを削除してください。
+
+1. 必要なら、権限のあるユーザーが値を復号して移しておく
+2. 「管理 → カスタムフィールド」で暗号化テキストのフィールドを削除する（`custom_values` の値も削除されます）
+3. 監査ログのテーブルを削除する
+
+   ```bash
+   bundle exec rake redmine:plugins:migrate NAME=redmine_encrypted_custom_fields VERSION=0 RAILS_ENV=production
+   ```
+
+4. `plugins/redmine_encrypted_custom_fields` を削除して Redmine を再起動する
+5. 鍵を破棄する（バックアップに暗号文が残っているあいだは、保管を続けるかどうか検討してください）
+
+## テスト
+
+```bash
+RAILS_ENV=test bundle exec rake redmine:plugins:migrate NAME=redmine_encrypted_custom_fields
+bin/rails test plugins/redmine_encrypted_custom_fields/test
+```
+
+テストでは目印になる秘密文字列（`S3cr3t-CANARY-...`）を使い、次のどこにも現れないことを確認しています。
+
+- 保存データ: `custom_values` / `journal_details` / 監査ログ
+- HTML、CSV、PDF（ストリームを展開して検索）
+- REST API（JSON / XML）、メール、Atom
+- Rails のリクエストログ
+
+あわせて、次の点もテストしています。
+
+- 暗号化の正当性: 改ざん、鍵の誤り・未設定、タグの切り詰め
+- 権限: 閲覧できないチケット、他プロジェクトのチケット
+- 復号エンドポイント: GET、CSRF トークンなし、`format` 指定、API キーによる復号の拒否
+- 監査ログを保存できないときに値を返さないこと
+
+ブラウザでの表示・非表示（JavaScript）の動作は自動テストに含まれていません。
+
+## ライセンス
+
+GNU General Public License v2 またはそれ以降（Redmine 本体と同じ）。[LICENSE](LICENSE) を参照してください。

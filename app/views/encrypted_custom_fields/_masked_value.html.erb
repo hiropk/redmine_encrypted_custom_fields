@@ -1,0 +1,11 @@
+<%# 描画するのはマスクだけ。平文は明示的な POST で取得し、
+    encrypted_custom_fields.js が textContent で挿入する。 %>
+<span class="ecf-field"<% if reveal_url %> data-ecf-reveal-url="<%= reveal_url %>"<% end %>>
+  <span class="ecf-mask" aria-label="<%= l(:label_ecf_masked_value) %>"><%= RedmineEncryptedCustomFields::MASK_HTML %></span>
+  <% if reveal_url %>
+    <span class="ecf-value" hidden></span>
+    <button type="button" class="ecf-button ecf-reveal"><%= l(:button_ecf_reveal) %></button>
+    <button type="button" class="ecf-button ecf-hide" hidden><%= l(:button_ecf_hide) %></button>
+    <span class="ecf-error" hidden></span>
+  <% end %>
+</span>

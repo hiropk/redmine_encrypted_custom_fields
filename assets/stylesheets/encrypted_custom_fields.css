@@ -1,0 +1,46 @@
+.ecf-field {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5em;
+}
+
+.ecf-mask {
+  letter-spacing: 0.1em;
+  color: #888;
+}
+
+.ecf-value {
+  font-family: monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+  padding: 0 0.3em;
+  background: #fffbe6;
+  border: 1px solid #f0d97a;
+  border-radius: 3px;
+}
+
+.ecf-button {
+  font-size: 0.9em;
+  padding: 0 0.6em;
+  cursor: pointer;
+}
+
+.ecf-error {
+  color: #c00;
+  font-size: 0.9em;
+}
+
+.ecf-edit .ecf-actions {
+  display: block;
+  margin-bottom: 0.3em;
+}
+
+.ecf-edit .ecf-actions label.inline {
+  margin-right: 1em;
+}
+
+.ecf-field [hidden],
+.ecf-edit [hidden] {
+  display: none !important;
+}
