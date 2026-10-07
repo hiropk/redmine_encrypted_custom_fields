@@ -10,7 +10,8 @@
 
 Redmine::Plugin.register :redmine_encrypted_custom_fields do
   name 'Redmine Encrypted Custom Fields'
-  author 'Hiroyuki Kano'
+  author 'hiropk'
+  author_url 'https://github.com/hiropk'
   description 'Adds an "Encrypted text" issue custom field format. Values are stored ' \
               'with AES-256-GCM, masked everywhere, and revealed only on demand with an audit trail.'
   version RedmineEncryptedCustomFields::VERSION
