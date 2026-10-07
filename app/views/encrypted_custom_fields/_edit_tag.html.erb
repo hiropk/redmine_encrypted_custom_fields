@@ -1,0 +1,20 @@
+<%# 保存済みの値（平文・暗号文とも）は描画しない。維持 / 置換 / 削除はユーザーが
+    明示的に選び、入力欄が空なら「維持」として扱う。 %>
+<span class="ecf-edit">
+  <% if stored %>
+    <span class="ecf-actions">
+      <label class="inline"><%= radio_button_tag "#{tag_name}[action]", 'keep', !pending, id: "#{tag_id}_keep" %> <%= l(:label_ecf_keep) %></label>
+      <label class="inline"><%= radio_button_tag "#{tag_name}[action]", 'replace', pending, id: "#{tag_id}_replace" %> <%= l(:label_ecf_replace) %></label>
+      <label class="inline"><%= radio_button_tag "#{tag_name}[action]", 'clear', false, id: "#{tag_id}_clear" %> <%= l(:label_ecf_clear) %></label>
+    </span>
+  <% end %>
+  <%= password_field_tag "#{tag_name}[#{RedmineEncryptedCustomFields::SECRET_PARAM}]", nil,
+                         id: tag_id,
+                         class: ['ecf-secret-input', input_class].compact.join(' '),
+                         autocomplete: 'new-password',
+                         spellcheck: false,
+                         placeholder: stored ? l(:label_ecf_placeholder_replace) : l(:label_ecf_placeholder_new) %>
+  <% if pending %>
+    <em class="info"><%= l(:text_ecf_reenter) %></em>
+  <% end %>
+</span>

@@ -1,0 +1,33 @@
+<%= title l(:label_ecf_audit_logs) %>
+
+<% if @logs.empty? %>
+  <p class="nodata"><%= l(:label_no_data) %></p>
+<% else %>
+<div class="autoscroll">
+<table class="list ecf-audit-logs">
+  <thead><tr>
+    <th><%= l(:field_created_on) %></th>
+    <th><%= l(:field_user) %></th>
+    <th><%= l(:label_project) %></th>
+    <th><%= l(:label_issue) %></th>
+    <th><%= l(:label_custom_field) %></th>
+    <th><%= l(:field_ecf_action) %></th>
+    <th><%= l(:field_ecf_ip_address) %></th>
+  </tr></thead>
+  <tbody>
+  <% @logs.each do |log| %>
+    <tr class="<%= log.action %>">
+      <td><%= format_time(log.created_on) %></td>
+      <td><%= log.user ? link_to_user(log.user) : "##{log.user_id}" %></td>
+      <td><%= log.project ? link_to_project(log.project) : (log.project_id ? "##{log.project_id}" : '') %></td>
+      <td><%= log.issue ? link_to_issue(log.issue, subject: false) : "##{log.issue_id}" %></td>
+      <td><%= log.custom_field ? log.custom_field.name : "##{log.custom_field_id}" %></td>
+      <td><%= l("label_ecf_action_#{log.action}") %></td>
+      <td><%= log.ip_address %></td>
+    </tr>
+  <% end %>
+  </tbody>
+</table>
+</div>
+<span class="pagination"><%= pagination_links_full @log_pages, @log_count %></span>
+<% end %>
